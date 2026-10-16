@@ -56,8 +56,8 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    UIInterfaceOrientationMask originalMask = %orig;
-    return originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+    // Home Screen only: allow portrait and upside-down, exclude landscape.
+    return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
 }
 %end
 %hook SBCoverSheetPrimarySlidingViewController
