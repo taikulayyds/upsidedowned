@@ -1,55 +1,86 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
-static uint16_t forcePadIdiom = 0;
+@interface SBApplicationInfo : NSObject
+@property(nonatomic, readonly) UIInterfaceOrientationMask supportedInterfaceOrientations;
+@property(nonatomic, readonly) NSString *bundleIdentifier;
+@end
+@interface SBApplication : NSObject
+@property(nonatomic, readonly) SBApplicationInfo *info;
+@end
 
-//just a kopycat from TrollPad (https://github.com/khanhduytran0/TrollPad)
+static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
+
 %hook UIDevice
 - (UIUserInterfaceIdiom)userInterfaceIdiom {
-    if (forcePadIdiom > 0) {
+    if ([NSThread.currentThread.threadDictionary[UDPadDepthKey] unsignedIntegerValue] > 0)
         return UIUserInterfaceIdiomPad;
-    } else {
-        return %orig;
-    }
+    return %orig;
 }
 %end
 
 %hook SBTraitsSceneParticipantDelegate
-// Allow upside down
-- (BOOL)_isAllowedToHavePortraitUpsideDown {
-    return YES;
-}
-
+- (BOOL)_isAllowedToHavePortraitUpsideDown { return YES; }
 - (NSInteger)_orientationMode {
-    forcePadIdiom++;
-    NSInteger result = %orig;
-    forcePadIdiom--;
-    return result;
+    NSMutableDictionary *d = NSThread.currentThread.threadDictionary;
+    NSNumber *old = d[UDPadDepthKey];
+    d[UDPadDepthKey] = @([old unsignedIntegerValue] + 1);
+    @try {
+        return %orig;
+    }
+    @finally {
+        if (old) d[UDPadDepthKey] = old; else [d removeObjectForKey:UDPadDepthKey];
+    }
 }
 %end
 
 %hook SpringBoard
-// Allow landscape Home Screen
-- (NSInteger)homeScreenRotationStyle {
-    return 1;
-}
+- (NSInteger)homeScreenRotationStyle { return 1; }
 %end
 
+// Keep the landscape-App safeguard. The only extra YES is for the
+// SpringBoard descriptor itself; do not make every third-party app Medusa.
 %hook SBApplication
 - (BOOL)isMedusaCapable {
-    return YES;
+    SBApplicationInfo *info = [self respondsToSelector:@selector(info)] ? self.info : nil;
+    NSString *bid = [info respondsToSelector:@selector(bundleIdentifier)] ? info.bundleIdentifier : nil;
+    if ([bid isEqualToString:@"com.apple.springboard"])
+        return YES;
+    if (!info || ![info respondsToSelector:@selector(supportedInterfaceOrientations)])
+        return %orig;
+    UIInterfaceOrientationMask m = info.supportedInterfaceOrientations;
+    if (m == 0) return %orig;
+    return (m & UIInterfaceOrientationMaskPortrait) != 0;
 }
 %end
 
-// Allow upside down Home Screen
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return %orig | UIInterfaceOrientationMaskPortraitUpsideDown;
+    UIInterfaceOrientationMask originalMask = %orig;
+    return originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+}
+%end
+%hook SBCoverSheetPrimarySlidingViewController
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    UIInterfaceOrientationMask originalMask = %orig;
+    return originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
 }
 %end
 
-// Allow upside down Lock Screen
-%hook SBCoverSheetPrimarySlidingViewController
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return %orig | UIInterfaceOrientationMaskPortraitUpsideDown;
-}
+%group UDIOS17UpsideDownPolicy
+%hook SpringBoard
+- (BOOL)supportsPortraitUpsideDownOrientation { return YES; }
 %end
+%end
+%ctor {
+    %init;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
+        Class c = NSClassFromString(@"SpringBoard");
+        Method m = class_getInstanceMethod(c, @selector(supportsPortraitUpsideDownOrientation));
+        char t[16] = {0};
+        if (m && method_getNumberOfArguments(m) == 2) {
+            method_getReturnType(m, t, sizeof(t));
+            if ((t[0] == 'B' || t[0] == 'c') && t[1] == '\0') %init(UDIOS17UpsideDownPolicy);
+        }
+    }
+}

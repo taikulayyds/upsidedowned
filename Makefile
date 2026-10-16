@@ -1,10 +1,7 @@
-export THEOS = /Users/huynguyen/Desktop/theos
-#change your theos path if needed
-#TARGET := iphone:clang:latest:16.5
+# Supply THEOS through your environment, or set it on the make command line.
+TARGET := iphone:clang:latest:15.0
 INSTALL_TARGET_PROCESSES = SpringBoard
-THEOS_PACKAGE_SCHEME = rootless
-#THEOS_PACKAGE_SCHEME = roothide
-#also added roothide if needed
+THEOS_PACKAGE_SCHEME ?= rootless
 ARCHS = arm64 arm64e
 
 include $(THEOS)/makefiles/common.mk
