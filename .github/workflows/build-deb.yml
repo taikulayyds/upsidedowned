@@ -1,0 +1,75 @@
+name: Build rootless and roothide DEBs
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scheme: rootless
+            theos_repo: theos/theos
+          - scheme: roothide
+            theos_repo: roothide/theos
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      CI: '1'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install matching Theos with Xcode SDK
+        env:
+          THEOS_REPO: ${{ matrix.theos_repo }}
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          brew install ldid xz
+          git clone --recursive "https://github.com/${THEOS_REPO}.git" "$THEOS"
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          test -d "$SDK_PATH"
+          mkdir -p "$THEOS/sdks"
+          ln -s "$SDK_PATH" "$THEOS/sdks/$(basename "$SDK_PATH")"
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build package
+        env:
+          PACKAGE_SCHEME: ${{ matrix.scheme }}
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          make clean FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$PACKAGE_SCHEME"
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME="$PACKAGE_SCHEME" ARCHS="arm64 arm64e"
+
+      - name: Verify both slices in staged plugin
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          files = list(Path('.theos/_').rglob('upsidedowned.dylib'))
+          if not files:
+              raise SystemExit('Staged plugin not found')
+          for file in files:
+              subprocess.run(['xcrun', 'lipo', '-info', str(file)], check=True)
+              result = subprocess.run(['xcrun', 'lipo', '-archs', str(file)], check=True, capture_output=True, text=True)
+              archs = set(result.stdout.split())
+              print(f'{file}: {result.stdout.strip()}', flush=True)
+              missing = {'arm64', 'arm64e'} - archs
+              if missing:
+                  raise SystemExit(f'Missing architecture(s): {sorted(missing)}')
+          PY
+
+      - name: Upload installable DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: upsidedowned-${{ matrix.scheme }}-deb
+          path: packages/*.deb
+          if-no-files-found: error
