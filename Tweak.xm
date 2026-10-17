@@ -24,9 +24,9 @@ static void UDFLog(NSInteger hook, long long a, long long b, long long c) {
     @try {
         NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/UDFSystemTest"];
         NSFileManager *fm = NSFileManager.defaultManager;
-        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
         NSString *path = [dir stringByAppendingPathComponent:@"orientation.log"];
-        if ([[fm attributesOfItemAtPath:path error:nil][NSFileSize] unsignedLongLongValue] >= 65536) return;
+        if ([[fm attributesOfItemAtPath:path error:NULL][NSFileSize] unsignedLongLongValue] >= 65536) return;
         if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
         NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
         [f seekToEndOfFile];
