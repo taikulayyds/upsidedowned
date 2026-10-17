@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <string.h>
 // Read-only APIs declared in the iOS 17.0.3 runtime-header dump.
 // Validate the runtime ABI; unknown states must not enable the override.
 static BOOL UDHasReturn(id receiver, SEL selector, char expected) {
@@ -13,50 +12,6 @@ static BOOL UDHasReturn(id receiver, SEL selector, char expected) {
     if (expected == '@') return type[0] == '@';
     if (expected == 'B') return (type[0] == 'B' || type[0] == 'c') && type[1] == '\0';
     return type[0] == expected && type[1] == '\0';
-}
-
-
-// Read-only, bounded diagnostics. No bundle IDs, text, geometry or personal data.
-static void UDFLog(NSInteger hook, long long a, long long b, long long c) {
-    if (![NSThread isMainThread]) return;
-    static NSUInteger count = 0;
-    if (count++ >= 600) return;
-    @try {
-        NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/UDFSystemTest"];
-        NSFileManager *fm = NSFileManager.defaultManager;
-        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
-        NSString *path = [dir stringByAppendingPathComponent:@"orientation.log"];
-        if ([[fm attributesOfItemAtPath:path error:NULL][NSFileSize] unsignedLongLongValue] >= 65536) return;
-        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
-        NSFileHandle *f = [NSFileHandle fileHandleForWritingAtPath:path];
-        [f seekToEndOfFile];
-        [f writeData:[[NSString stringWithFormat:@"%ld %lld %lld %lld\n", (long)hook, a, b, c] dataUsingEncoding:NSUTF8StringEncoding]];
-        [f closeFile];
-    } @catch (NSException *e) { (void)e; }
-}
-static BOOL UDFOneOrientation(NSString *name, NSString *selector) {
-    Method m = class_getInstanceMethod(NSClassFromString(name), NSSelectorFromString(selector));
-    if (!m || method_getNumberOfArguments(m) != 3) return NO;
-    char r[16] = {0}, a[16] = {0};
-    method_getReturnType(m, r, sizeof(r));
-    method_getArgumentType(m, 2, a, sizeof(a));
-    return !strcmp(r, "v") && !strcmp(a, "q");
-}
-static long long UDFReadOrientation(id object, NSString *name) {
-    SEL sel = NSSelectorFromString(name);
-    if (!UDHasReturn(object, sel, 'q')) return -1;
-    return ((long long (*)(id, SEL))objc_msgSend)(object, sel);
-}
-static void UDFViewProbe(id object, NSInteger hook) {
-    if (![NSThread isMainThread]) return;
-    @try {
-        if (![object isKindOfClass:UIViewController.class]) return;
-        UIViewController *vc = object;
-        UIWindow *w = vc.viewIfLoaded.window;
-        if (!w) return;
-        UDFLog(hook, UDFReadOrientation(vc, @"interfaceOrientation"),
-            UDFReadOrientation(w.windowScene, @"interfaceOrientation"), 0);
-    } @catch (NSException *e) { (void)e; }
 }
 
 static BOOL UDAppUpsideDownAllowedNow(void) {
@@ -93,8 +48,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (UIUserInterfaceIdiom)userInterfaceIdiom {
     if ([NSThread.currentThread.threadDictionary[UDPadDepthKey] unsignedIntegerValue] > 0)
         return UIUserInterfaceIdiomPad;
-    UIUserInterfaceIdiom original = %orig;
-    return original;
+    return %orig;
 }
 %end
 
@@ -105,8 +59,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
     NSNumber *old = d[UDPadDepthKey];
     d[UDPadDepthKey] = @([old unsignedIntegerValue] + 1);
     @try {
-        NSInteger original = %orig;
-        return original;
+        return %orig;
     }
     @finally {
         if (old) d[UDPadDepthKey] = old; else [d removeObjectForKey:UDPadDepthKey];
@@ -118,11 +71,10 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (NSInteger)homeScreenRotationStyle { return 1; }
 %end
 
-// No Medusa capability hooks.
+// Test A: SBApplication.isMedusaCapable is NOT hooked.
 
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    UDFViewProbe(self, 20);
     // Home Screen only: allow portrait and upside-down, exclude landscape.
     return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
 }
@@ -130,8 +82,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %hook SBCoverSheetPrimarySlidingViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     UIInterfaceOrientationMask originalMask = %orig;
-    UDFViewProbe(self, 21);
-    return (originalMask | UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown) & ~(UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight);
+    return originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
 }
 %end
 
@@ -141,7 +92,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %end
 %end
 
-// F: based on E; change only the supported mask at the SpringBoard scene boundary.
+// E: change only the supported mask at the SpringBoard scene boundary.
 // _application and _supportedOrientations are declared in iOS 17 headers.
 %group UDSceneUpsideMask
 %hook SBTraitsSceneParticipantDelegate
@@ -161,16 +112,15 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
         if (!UDHasReturn(info, bundleSelector, '@')) return originalMask;
         id bundle = ((id (*)(id, SEL))objc_msgSend)(info, bundleSelector);
         if (![bundle isKindOfClass:NSString.class] || ![bundle length]) return originalMask;
-        // Apple allowlist: Settings only. Do not expand other Apple scenes.
-        if ([bundle hasPrefix:@"com.apple."] && ![bundle isEqualToString:@"com.apple.Preferences"]) return originalMask;
-        SEL supported = NSSelectorFromString(@"supportedInterfaceOrientations");
-        if (!UDHasReturn(info, supported, 'Q')) return originalMask;
-        unsigned long long declared = ((unsigned long long (*)(id, SEL))objc_msgSend)(info, supported);
-        // Both current scene AND application-info masks must include portrait.
-        // Never turn a landscape-only fullscreen request into a portrait request.
-        if (!(declared & UIInterfaceOrientationMaskPortrait)) return originalMask;
-        unsigned long long result = originalMask | UIInterfaceOrientationMaskAll;
-        UDFLog(10, originalMask, declared, result);
+        // Include Apple apps (e.g. Settings); only SpringBoard keeps its
+        // separate Home/Lock policy instead of the application-scene override.
+        if ([bundle isEqualToString:@"com.apple.springboard"]) return originalMask;
+        unsigned long long result = originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+        static unsigned int diagnosticCount = 0;
+        if (diagnosticCount < 80) {
+            ++diagnosticCount;
+            NSLog(@"[UD-E] app=%@ supported=0x%llx -> 0x%llx", bundle, originalMask, result);
+        }
         return result;
     } @catch (NSException *exception) {
         (void)exception;
@@ -180,49 +130,8 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %end
 %end
 
-
-// Observe a different, actual layout chain; do not repeat S1/S2 overrides.
-%group UDFLayoutProbe
-%hook SBMainDisplaySceneLayoutStatusBarView
-- (void)layoutStatusBarForSpringBoardRotationToOrientation:(long long)orientation {
-    %orig;
-    @try {
-        if ([NSThread isMainThread] && [(id)self isKindOfClass:UIView.class]) {
-            UIWindow *w = ((UIView *)self).window;
-            UDFLog(30, orientation, UDFReadOrientation(self, @"containerOrientation"),
-                UDFReadOrientation(w.windowScene, @"interfaceOrientation"));
-        }
-    } @catch (NSException *e) { (void)e; }
-}
-%end
-%end
-%group UDFWindowProbe
-%hook SBStatusBarWindow
-- (void)_setStatusBarWindowOrientation:(long long)orientation {
-    %orig;
-    @try {
-        if ([NSThread isMainThread] && [(id)self isKindOfClass:UIWindow.class]) {
-            UDFLog(31, orientation, UDFReadOrientation(self, @"orientation"),
-                UDFReadOrientation(((UIWindow *)self).windowScene, @"interfaceOrientation"));
-        }
-    } @catch (NSException *e) { (void)e; }
-}
-%end
-%end
-
 %ctor {
-    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     %init;
-    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
-        if (UDFOneOrientation(@"SBMainDisplaySceneLayoutStatusBarView", @"layoutStatusBarForSpringBoardRotationToOrientation:")) {
-            %init(UDFLayoutProbe);
-            UDFLog(2, 0, 0, 0);
-        }
-        if (UDFOneOrientation(@"SBStatusBarWindow", @"_setStatusBarWindowOrientation:")) {
-            %init(UDFWindowProbe);
-            UDFLog(3, 0, 0, 0);
-        }
-    }
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
         Class sceneClass = NSClassFromString(@"SBTraitsSceneParticipantDelegate");
         Method maskMethod = class_getInstanceMethod(sceneClass, NSSelectorFromString(@"_supportedOrientations"));
@@ -231,7 +140,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
             method_getReturnType(maskMethod, maskType, sizeof(maskType));
             if (maskType[0] == 'Q' && maskType[1] == '\0') {
                 %init(UDSceneUpsideMask);
-                UDFLog(1, 0, 0, 0);
+                NSLog(@"[UD-E] SpringBoard-only scene mask candidate enabled");
             }
         }
     }
