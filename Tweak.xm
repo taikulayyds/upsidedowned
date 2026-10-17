@@ -187,7 +187,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (void)layoutStatusBarForSpringBoardRotationToOrientation:(long long)orientation {
     %orig;
     @try {
-        if ([NSThread isMainThread] && [self isKindOfClass:UIView.class]) {
+        if ([NSThread isMainThread] && [(id)self isKindOfClass:UIView.class]) {
             UIWindow *w = ((UIView *)self).window;
             UDFLog(30, orientation, UDFReadOrientation(self, @"containerOrientation"),
                 UDFReadOrientation(w.windowScene, @"interfaceOrientation"));
@@ -201,7 +201,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (void)_setStatusBarWindowOrientation:(long long)orientation {
     %orig;
     @try {
-        if ([NSThread isMainThread] && [self isKindOfClass:UIWindow.class]) {
+        if ([NSThread isMainThread] && [(id)self isKindOfClass:UIWindow.class]) {
             UDFLog(31, orientation, UDFReadOrientation(self, @"orientation"),
                 UDFReadOrientation(((UIWindow *)self).windowScene, @"interfaceOrientation"));
         }
