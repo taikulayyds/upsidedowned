@@ -9,28 +9,10 @@
 @property(nonatomic, readonly) SBApplicationInfo *info;
 @end
 
-static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
-
-%hook UIDevice
-- (UIUserInterfaceIdiom)userInterfaceIdiom {
-    if ([NSThread.currentThread.threadDictionary[UDPadDepthKey] unsignedIntegerValue] > 0)
-        return UIUserInterfaceIdiomPad;
-    return %orig;
-}
-%end
-
+// Test B: no UIDevice idiom override and no _orientationMode hook.
 %hook SBTraitsSceneParticipantDelegate
-- (BOOL)_isAllowedToHavePortraitUpsideDown { return YES; }
-- (NSInteger)_orientationMode {
-    NSMutableDictionary *d = NSThread.currentThread.threadDictionary;
-    NSNumber *old = d[UDPadDepthKey];
-    d[UDPadDepthKey] = @([old unsignedIntegerValue] + 1);
-    @try {
-        return %orig;
-    }
-    @finally {
-        if (old) d[UDPadDepthKey] = old; else [d removeObjectForKey:UDPadDepthKey];
-    }
+- (BOOL)_isAllowedToHavePortraitUpsideDown {
+    return YES;
 }
 %end
 
@@ -38,7 +20,21 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (NSInteger)homeScreenRotationStyle { return 1; }
 %end
 
-// Test A: SBApplication.isMedusaCapable is NOT hooked.
+// Keep the landscape-App safeguard. The only extra YES is for the
+// SpringBoard descriptor itself; do not make every third-party app Medusa.
+%hook SBApplication
+- (BOOL)isMedusaCapable {
+    SBApplicationInfo *info = [self respondsToSelector:@selector(info)] ? self.info : nil;
+    NSString *bid = [info respondsToSelector:@selector(bundleIdentifier)] ? info.bundleIdentifier : nil;
+    if ([bid isEqualToString:@"com.apple.springboard"])
+        return YES;
+    if (!info || ![info respondsToSelector:@selector(supportedInterfaceOrientations)])
+        return %orig;
+    UIInterfaceOrientationMask m = info.supportedInterfaceOrientations;
+    if (m == 0) return %orig;
+    return (m & UIInterfaceOrientationMaskPortrait) != 0;
+}
+%end
 
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
