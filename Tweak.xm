@@ -155,3 +155,69 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
         }
     }
 }
+
+
+// G diagnostic only: no status-bar transform, no orientation-mask change.
+// It records the classes/methods present on this build before any future policy hook.
+static void UD_G_LogClassMethods(Class cls) {
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (!methods) return;
+    NSLog(@"[UD-G] class=%@ instanceMethods=%u", NSStringFromClass(cls), count);
+    for (unsigned int i = 0; i < count; ++i) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if ([name rangeOfString:@"statusBar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"orientation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"rotation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"scene" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            NSLog(@"[UD-G] %@ - %@ types=%s", NSStringFromClass(cls), name, method_getTypeEncoding(methods[i]));
+        }
+    }
+    free(methods);
+}
+
+static void UD_G_LogState(NSString *reason) {
+    if (![NSThread isMainThread]) return;
+    UIDevice *device = UIDevice.currentDevice;
+    UIApplication *application = UIApplication.sharedApplication;
+    NSString *appOrientation = @"unavailable";
+    SEL appSel = NSSelectorFromString(@"statusBarOrientation");
+    if ([application respondsToSelector:appSel]) {
+        UIInterfaceOrientation value = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(application, appSel);
+        appOrientation = [NSString stringWithFormat:@"%ld", (long)value];
+    }
+    NSLog(@"[UD-G] state reason=%@ deviceOrientation=%ld appStatusBarOrientation=%@", reason, (long)device.orientation, appOrientation);
+    NSArray *windows = application.windows;
+    for (UIWindow *window in windows) {
+        NSLog(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)window.windowScene.interfaceOrientation);
+    }
+}
+
+%ctor {
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 17) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray *names = @[
+            @"SBStatusBarManager", @"SBStatusBarStateAggregator", @"SBStatusBarSceneManager",
+            @"SBStatusBarWindow", @"SBStatusBarView", @"SBSceneManager", @"SBSceneHandle",
+            @"SBTraitsSceneParticipantDelegate", @"UIStatusBar", @"UIStatusBarManager",
+            @"_UIStatusBar", @"_UIStatusBarManager"
+        ];
+        for (NSString *name in names) UD_G_LogClassMethods(NSClassFromString(name));
+        UD_G_LogState(@"initial");
+        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:UIDeviceOrientationDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            (void)note;
+            UD_G_LogState(@"UIDeviceOrientationDidChange");
+        }];
+        [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            (void)note;
+            UD_G_LogState(@"UIApplicationDidBecomeActive");
+        }];
+        [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            (void)note;
+            UD_G_LogState(@"UIApplicationWillResignActive");
+        }];
+    });
+}
