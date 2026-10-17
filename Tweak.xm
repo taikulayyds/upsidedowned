@@ -156,121 +156,139 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
     }
 }
 
-
-// Bounded local diagnostics: private file, no network or screen content.
+// H: targeted READ-ONLY diagnostics, not a synchronization fix.
+#import <string.h>
 #import <stdio.h>
-#import <stdarg.h>
 #import <sys/stat.h>
-static NSString *UDGFilePath;
-static void UDGPrepareFile(void) {
-    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *path = [directory stringByAppendingPathComponent:@"upsidedowned-G.txt"];
-    FILE *file = fopen(path.fileSystemRepresentation, "w");
-    if (!file) {
-        path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"upsidedowned-G.txt"];
-        file = fopen(path.fileSystemRepresentation, "w");
-    }
-    if (file) {
-        chmod(path.fileSystemRepresentation, 0600);
-        fprintf(file, "G file diagnostics; overwritten on SpringBoard restart.\n");
-        fclose(file);
-        UDGFilePath = [path copy];
-    }
+static NSString *UDHPath;
+static NSTimeInterval UDHEnd;
+static NSUInteger UDHEvents;
+static BOOL UDHBusy;
+static BOOL UDHActive(void) {
+    return NSThread.isMainThread && UDHPath && NSDate.date.timeIntervalSince1970 < UDHEnd;
 }
-static void UDGWrite(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
-static void UDGWrite(NSString *format, ...) {
-    if (!UDGFilePath) return;
-    struct stat info;
-    if (stat(UDGFilePath.fileSystemRepresentation, &info) == 0 && info.st_size >= 2 * 1024 * 1024) return;
-    va_list args;
-    va_start(args, format);
-    NSString *text = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    FILE *file = fopen(UDGFilePath.fileSystemRepresentation, "a");
-    if (!file) return;
-    fprintf(file, "%.3f %s\n", NSDate.date.timeIntervalSince1970, text.UTF8String);
-    fclose(file);
+static void UDHLog(NSString *text) {
+    if (!UDHActive()) return;
+    struct stat st;
+    if (stat(UDHPath.fileSystemRepresentation, &st) != 0 || st.st_size >= 512 * 1024) return;
+    FILE *f = fopen(UDHPath.fileSystemRepresentation, "a");
+    if (!f) return;
+    fprintf(f, "%.3f [UD-H] %s\n", NSDate.date.timeIntervalSince1970, text.UTF8String);
+    fclose(f);
 }
-
-// G diagnostic only: no status-bar transform, no orientation-mask change.
-// It records the classes/methods present on this build before any future policy hook.
-static void UD_G_LogClassMethods(Class cls) {
-    if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    if (!methods) return;
-    UDGWrite(@"[UD-G] class=%@ instanceMethods=%u", NSStringFromClass(cls), count);
-    for (unsigned int i = 0; i < count; ++i) {
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-        if ([name rangeOfString:@"statusBar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"orientation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"rotation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"scene" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            UDGWrite(@"[UD-G] %@ - %@ types=%s", NSStringFromClass(cls), name, method_getTypeEncoding(methods[i]));
+static NSString *UDHOrientation(id object) {
+    SEL sel = NSSelectorFromString(@"orientation");
+    if (!UDHasReturn(object, sel, 'q')) return @"unavailable";
+    long long value = ((long long (*)(id, SEL))objc_msgSend)(object, sel);
+    return [NSString stringWithFormat:@"%lld", value];
+}
+static void UDHWindow(UIWindow *window, NSString *reason) {
+    if (!UDHActive() || UDHBusy) return;
+    UDHBusy = YES;
+    @try {
+        id bar = nil;
+        SEL sel = NSSelectorFromString(@"statusBar");
+        if (UDHasReturn(window, sel, '@')) bar = ((id (*)(id, SEL))objc_msgSend)(window, sel);
+        UIWindowScene *scene = window.windowScene;
+        UDHLog([NSString stringWithFormat:@"%@ win=%p class=%@ scene=%p sceneID=%@ activation=%ld interface=%ld own=%@ bar=%p barClass=%@ barOrientation=%@ hidden=%d level=%.1f root=%@ bounds=%@", reason, (__bridge void *)window, NSStringFromClass(window.class), (__bridge void *)scene, scene.session.persistentIdentifier, (long)scene.activationState, (long)scene.interfaceOrientation, UDHOrientation(window), (__bridge void *)bar, bar ? NSStringFromClass([bar class]) : @"nil", UDHOrientation(bar), window.hidden, window.windowLevel, NSStringFromClass(window.rootViewController.class), NSStringFromCGRect(window.bounds)]);
+        // Discover the actual wrapper ABI once. Never invoke its unknown setters.
+        static Class seenClass;
+        if (bar && [bar class] != seenClass) {
+            seenClass = [bar class];
+            for (Class c = seenClass; c && c != UIView.class && c != NSObject.class; c = class_getSuperclass(c)) {
+                unsigned int n = 0;
+                Method *list = class_copyMethodList(c, &n);
+                for (unsigned int i = 0; i < n; ++i) {
+                    NSString *name = NSStringFromSelector(method_getName(list[i]));
+                    if ([name rangeOfString:@"orientation" options:NSCaseInsensitiveSearch].location != NSNotFound || [name rangeOfString:@"statusBar" options:NSCaseInsensitiveSearch].location != NSNotFound)
+                        UDHLog([NSString stringWithFormat:@"wrapperABI %@ %@ %s", NSStringFromClass(c), name, method_getTypeEncoding(list[i])]);
+                }
+                free(list);
+            }
         }
-    }
-    free(methods);
-}
-
-static void UD_G_LogState(NSString *reason) {
-    if (![NSThread isMainThread]) return;
-    UIDevice *device = UIDevice.currentDevice;
-    UIApplication *application = UIApplication.sharedApplication;
-    NSString *appOrientation = @"unavailable";
-    SEL appSel = NSSelectorFromString(@"statusBarOrientation");
-    if ([application respondsToSelector:appSel]) {
-        UIInterfaceOrientation value = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(application, appSel);
-        appOrientation = [NSString stringWithFormat:@"%ld", (long)value];
-    }
-    UDGWrite(@"[UD-G] state reason=%@ deviceOrientation=%ld appStatusBarOrientation=%@", reason, (long)device.orientation, appOrientation);
-    // UIApplication.windows is deprecated and treated as an error by the
-    // GitHub Xcode build. Enumerate windows through connected window scenes.
-    NSSet *connectedScenes = application.connectedScenes;
-    for (UIScene *scene in connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        for (UIWindow *window in windowScene.windows) {
-            UDGWrite(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)windowScene.interfaceOrientation);
+        if ([bar isKindOfClass:UIView.class]) {
+            UIView *view = (UIView *)bar;
+            UDHLog([NSString stringWithFormat:@"barView class=%@ hidden=%d alpha=%.2f transform=%@", NSStringFromClass(view.class), view.hidden, view.alpha, NSStringFromCGAffineTransform(view.transform)]);
+            NSUInteger count = 0;
+            for (UIView *child in view.subviews) {
+                if (++count > 8) break;
+                UDHLog([NSString stringWithFormat:@"barChild class=%@ orientation=%@ hidden=%d transform=%@", NSStringFromClass(child.class), UDHOrientation(child), child.hidden, NSStringFromCGAffineTransform(child.transform)]);
+            }
         }
+    } @catch (NSException *e) {
+        UDHLog([NSString stringWithFormat:@"readException=%@", e.name]);
+    } @finally {
+        UDHBusy = NO;
     }
 }
-
+static void UDHEvent(id object, NSString *name, long long value, NSString *phase) {
+    if (!UDHActive() || UDHBusy || UDHEvents >= 400) return;
+    ++UDHEvents;
+    UDHWindow((UIWindow *)object, [NSString stringWithFormat:@"setter=%@ requested=%lld %@", name, value, phase]);
+}
+%group UDHTrace
+%hook SBStatusBarWindow
+- (void)setOrientation:(long long)value {
+    UDHEvent(self, @"setOrientation:", value, @"before");
+    %orig;
+    UDHEvent(self, @"setOrientation:", value, @"after");
+}
+- (void)setOrientation:(long long)value animationParameters:(id)parameters {
+    UDHEvent(self, @"setOrientation:animationParameters:", value, @"before");
+    %orig;
+    UDHEvent(self, @"setOrientation:animationParameters:", value, @"after");
+}
+- (void)_setStatusBarWindowOrientation:(long long)value {
+    UDHEvent(self, @"_setStatusBarWindowOrientation:", value, @"before");
+    %orig;
+    UDHEvent(self, @"_setStatusBarWindowOrientation:", value, @"after");
+}
+%end
+%end
+static BOOL UDHSignature(Class cls, NSString *name, const char *encoding) {
+    if (!cls) return NO;
+    Method m = class_getInstanceMethod(cls, NSSelectorFromString(name));
+    return m && strcmp(method_getTypeEncoding(m), encoding) == 0;
+}
 %ctor {
-    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 17) return;
+    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] || NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 17) return;
+    Class cls = NSClassFromString(@"SBStatusBarWindow");
+    BOOL valid = UDHSignature(cls, @"setOrientation:", "v24@0:8q16") && UDHSignature(cls, @"setOrientation:animationParameters:", "v32@0:8q16@24") && UDHSignature(cls, @"_setStatusBarWindowOrientation:", "v24@0:8q16");
+    if (valid) {
+        %init(UDHTrace);
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
-        UDGPrepareFile();
-        UDGWrite(@"[UD-G] file=%@", UDGFilePath);
-        NSArray *names = @[
-            @"SBStatusBarManager", @"SBStatusBarStateAggregator", @"SBStatusBarSceneManager",
-            @"SBStatusBarWindow", @"SBStatusBarView", @"SBSceneManager", @"SBSceneHandle",
-            @"SBTraitsSceneParticipantDelegate", @"UIStatusBar", @"UIStatusBarManager",
-            @"_UIStatusBar", @"_UIStatusBarManager"
-        ];
-        for (NSString *name in names) UD_G_LogClassMethods(NSClassFromString(name));
-        UD_G_LogState(@"initial");
-        __block NSUInteger samples = 0;
-        NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *activeTimer) {
-            UD_G_LogState(@"periodic-2s");
-            if (++samples >= 90) {
-                UDGWrite(@"[UD-G] periodic sampling finished after 3 minutes");
-                [activeTimer invalidate];
+        NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL];
+        NSString *path = [directory stringByAppendingPathComponent:@"upsidedowned-H.txt"];
+        FILE *f = fopen(path.fileSystemRepresentation, "w");
+        if (!f) {
+            path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"upsidedowned-H.txt"];
+            f = fopen(path.fileSystemRepresentation, "w");
+        }
+        if (!f) return;
+        fclose(f);
+        chmod(path.fileSystemRepresentation, 0600);
+        UDHPath = [path copy];
+        UDHEnd = NSDate.date.timeIntervalSince1970 + 180.0;
+        UDHLog([NSString stringWithFormat:@"READ ONLY path=%@ setterHooks=%d duration=180s cap=512KiB; no lock/mask/statusbar writes", path, valid]);
+        NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+            if (!UDHActive()) { [t invalidate]; return; }
+            UDHLog([NSString stringWithFormat:@"sample device=%ld", (long)UIDevice.currentDevice.orientation]);
+            for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+                if (![s isKindOfClass:UIWindowScene.class]) continue;
+                for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                    NSString *name = NSStringFromClass(w.class);
+                    if ([w isKindOfClass:cls] || [name isEqualToString:@"SBHomeScreenWindow"] || [name isEqualToString:@"SBCoverSheetWindow"])
+                        UDHWindow(w, @"sample");
+                }
+            }
+            if (NSDate.date.timeIntervalSince1970 >= UDHEnd - 1.1) {
+                UDHLog(@"sampling finished; setter logging disabled");
+                UDHEnd = 0;
+                [t invalidate];
             }
         }];
         [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:UIDeviceOrientationDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            (void)note;
-            UD_G_LogState(@"UIDeviceOrientationDidChange");
-        }];
-        [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            (void)note;
-            UD_G_LogState(@"UIApplicationDidBecomeActive");
-        }];
-        [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-            (void)note;
-            UD_G_LogState(@"UIApplicationWillResignActive");
-        }];
     });
 }
