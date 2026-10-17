@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-
 // Read-only APIs declared in the iOS 17.0.3 runtime-header dump.
 // Validate the runtime ABI; unknown states must not enable the override.
 static BOOL UDHasReturn(id receiver, SEL selector, char expected) {
@@ -31,6 +30,8 @@ static BOOL UDAppUpsideDownAllowedNow(void) {
     BOOL effectivelyLocked = ((BOOL (*)(id, SEL))objc_msgSend)(manager, effectiveLock);
     return !userLocked && !effectivelyLocked;
 }
+
+
 
 
 @interface SBApplicationInfo : NSObject
@@ -70,31 +71,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (NSInteger)homeScreenRotationStyle { return 1; }
 %end
 
-// Test C: limited App capability override, only while BOTH locks are off.
-// No cached lock state, no unlock calls, no global YES for applications.
-%group UDUnlockedAppUpsideDown
-%hook SBApplication
-- (BOOL)isMedusaCapable {
-    BOOL originalCapability = %orig;
-    @try {
-        if (!UDAppUpsideDownAllowedNow()) return originalCapability;
-        SEL infoSelector = @selector(info);
-        if (!UDHasReturn(self, infoSelector, '@')) return originalCapability;
-        id info = ((id (*)(id, SEL))objc_msgSend)(self, infoSelector);
-        SEL maskSelector = @selector(supportedInterfaceOrientations);
-        if (!UDHasReturn(info, maskSelector, @encode(NSUInteger)[0])) return originalCapability;
-        NSUInteger mask = ((NSUInteger (*)(id, SEL))objc_msgSend)(info, maskSelector);
-        if (mask != 0 && (mask & UIInterfaceOrientationMaskPortrait) != 0) {
-            return YES;
-        }
-    } @catch (NSException *exception) {
-        (void)exception;
-    }
-    return originalCapability;
-}
-%end
-%end
-
+// Test A: SBApplication.isMedusaCapable is NOT hooked.
 
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
@@ -114,16 +91,55 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (BOOL)supportsPortraitUpsideDownOrientation { return YES; }
 %end
 %end
+
+// E: change only the supported mask at the SpringBoard scene boundary.
+// _application and _supportedOrientations are declared in iOS 17 headers.
+%group UDSceneUpsideMask
+%hook SBTraitsSceneParticipantDelegate
+- (unsigned long long)_supportedOrientations {
+    unsigned long long originalMask = %orig;
+    @try {
+        if (!(originalMask & UIInterfaceOrientationMaskPortrait)) return originalMask;
+        if (!UDAppUpsideDownAllowedNow()) return originalMask;
+        SEL appSelector = NSSelectorFromString(@"_application");
+        if (!UDHasReturn(self, appSelector, '@')) return originalMask;
+        id app = ((id (*)(id, SEL))objc_msgSend)(self, appSelector);
+        if (!app || ![app isKindOfClass:NSClassFromString(@"SBApplication")]) return originalMask;
+        SEL infoSelector = NSSelectorFromString(@"info");
+        if (!UDHasReturn(app, infoSelector, '@')) return originalMask;
+        id info = ((id (*)(id, SEL))objc_msgSend)(app, infoSelector);
+        SEL bundleSelector = NSSelectorFromString(@"bundleIdentifier");
+        if (!UDHasReturn(info, bundleSelector, '@')) return originalMask;
+        id bundle = ((id (*)(id, SEL))objc_msgSend)(info, bundleSelector);
+        if (![bundle isKindOfClass:NSString.class] || ![bundle length]) return originalMask;
+        // Do not change Apple system scenes or the established Home/Lock behavior.
+        if ([bundle hasPrefix:@"com.apple."]) return originalMask;
+        unsigned long long result = originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+        static unsigned int diagnosticCount = 0;
+        if (diagnosticCount < 80) {
+            ++diagnosticCount;
+            NSLog(@"[UD-E] app=%@ supported=0x%llx -> 0x%llx", bundle, originalMask, result);
+        }
+        return result;
+    } @catch (NSException *exception) {
+        (void)exception;
+    }
+    return originalMask;
+}
+%end
+%end
+
 %ctor {
     %init;
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
-        Class appClass = NSClassFromString(@"SBApplication");
-        Method capability = class_getInstanceMethod(appClass, @selector(isMedusaCapable));
-        char resultType[16] = {0};
-        if (capability && method_getNumberOfArguments(capability) == 2) {
-            method_getReturnType(capability, resultType, sizeof(resultType));
-            if ((resultType[0] == 'B' || resultType[0] == 'c') && resultType[1] == '\0') {
-                %init(UDUnlockedAppUpsideDown);
+        Class sceneClass = NSClassFromString(@"SBTraitsSceneParticipantDelegate");
+        Method maskMethod = class_getInstanceMethod(sceneClass, NSSelectorFromString(@"_supportedOrientations"));
+        char maskType[16] = {0};
+        if (maskMethod && method_getNumberOfArguments(maskMethod) == 2) {
+            method_getReturnType(maskMethod, maskType, sizeof(maskType));
+            if (maskType[0] == 'Q' && maskType[1] == '\0') {
+                %init(UDSceneUpsideMask);
+                NSLog(@"[UD-E] SpringBoard-only scene mask candidate enabled");
             }
         }
     }
