@@ -38,21 +38,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 - (NSInteger)homeScreenRotationStyle { return 1; }
 %end
 
-// Keep the landscape-App safeguard. The only extra YES is for the
-// SpringBoard descriptor itself; do not make every third-party app Medusa.
-%hook SBApplication
-- (BOOL)isMedusaCapable {
-    SBApplicationInfo *info = [self respondsToSelector:@selector(info)] ? self.info : nil;
-    NSString *bid = [info respondsToSelector:@selector(bundleIdentifier)] ? info.bundleIdentifier : nil;
-    if ([bid isEqualToString:@"com.apple.springboard"])
-        return YES;
-    if (!info || ![info respondsToSelector:@selector(supportedInterfaceOrientations)])
-        return %orig;
-    UIInterfaceOrientationMask m = info.supportedInterfaceOrientations;
-    if (m == 0) return %orig;
-    return (m & UIInterfaceOrientationMaskPortrait) != 0;
-}
-%end
+// Test A: SBApplication.isMedusaCapable is NOT hooked.
 
 %hook SBHomeScreenViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
