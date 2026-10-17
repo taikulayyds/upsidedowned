@@ -183,31 +183,48 @@ static BOOL UDSBEligible(id root) {
            !homeWindow.hidden && !view.hidden && view.alpha > 0.01;
 }
 
-%group UDSBSystemStatusBarCandidate
-%hook _SBStatusBarWindowRootViewController
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    UIInterfaceOrientationMask originalMask = %orig;
-    BOOL eligible = UDSBEligible(self);
-    UIInterfaceOrientationMask result = originalMask;
-    if (eligible) result |= UIInterfaceOrientationMaskPortraitUpsideDown;
-    static NSUInteger samples = 0;
-    static BOOL seen = NO;
-    static UIInterfaceOrientationMask lastOriginal = 0, lastResult = 0;
-    static BOOL lastEligible = NO;
-    if ([NSThread isMainThread] && samples < 40 &&
-        (!seen || lastOriginal != originalMask || lastResult != result ||
-         lastEligible != eligible)) {
-        os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
-            "[UDSB-S1] mask original=%llu result=%llu eligible=%d",
-            (unsigned long long)originalMask, (unsigned long long)result,
-            (int)eligible);
-        seen = YES;
-        lastOriginal = originalMask;
-        lastResult = result;
-        lastEligible = eligible;
-        samples++;
+
+// S2: preserve all App requests; only correct a portrait request for an
+// already-upside-down Home/Cover scene. Let Apple's setter perform layout.
+static NSInteger UDSBRequestedOrientation(id window, NSInteger requested) {
+    if (requested != UIInterfaceOrientationPortrait || ![NSThread isMainThread]) return requested;
+    @try {
+        if (![window isKindOfClass:UIWindow.class]) return requested;
+        UIViewController *root = [(UIWindow *)window rootViewController];
+        if (!UDSBEligible(root)) return requested;
+        static unsigned int count = 0;
+        if (count++ < 40) {
+            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
+                "[UDSB-S2] Home/Cover portrait request corrected to upside-down");
+        }
+        return UIInterfaceOrientationPortraitUpsideDown;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return requested;
     }
-    return result;
+}
+static BOOL UDSBSetterCompatible(Class cls, SEL sel, unsigned int arguments) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m || method_getNumberOfArguments(m) != arguments) return NO;
+    char result[16] = {0}, arg[16] = {0}, params[16] = {0};
+    method_getReturnType(m, result, sizeof(result));
+    method_getArgumentType(m, 2, arg, sizeof(arg));
+    if (strcmp(result, "v") || strcmp(arg, @encode(NSInteger))) return NO;
+    if (arguments == 4) {
+        method_getArgumentType(m, 3, params, sizeof(params));
+        if (params[0] != '@') return NO;
+    }
+    return YES;
+}
+%group UDSBWindowOrientationS2
+%hook SBStatusBarWindow
+- (void)setOrientation:(NSInteger)orientation {
+    NSInteger corrected = UDSBRequestedOrientation(self, orientation);
+    %orig(corrected);
+}
+- (void)setOrientation:(NSInteger)orientation animationParameters:(id)parameters {
+    NSInteger corrected = UDSBRequestedOrientation(self, orientation);
+    %orig(corrected, parameters);
 }
 %end
 %end
@@ -237,18 +254,11 @@ static BOOL UDSBEligible(id root) {
     }
     if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] &&
         NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
-        Class root = NSClassFromString(@"_SBStatusBarWindowRootViewController");
-        Method m = class_getInstanceMethod(root, @selector(supportedInterfaceOrientations));
-        char type[32] = {0};
-        if (m) method_getReturnType(m, type, sizeof(type));
-        if (m && method_getNumberOfArguments(m) == 2 &&
-            strcmp(type, @encode(UIInterfaceOrientationMask)) == 0) {
-            %init(UDSBSystemStatusBarCandidate);
-            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
-                             "[UDSB-S1] installed mask candidate");
-        } else {
-            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
-                             "[UDSB-S1] skipped: incompatible root method");
+        Class statusWindow = NSClassFromString(@"SBStatusBarWindow");
+        if (UDSBSetterCompatible(statusWindow, @selector(setOrientation:), 3) &&
+            UDSBSetterCompatible(statusWindow, @selector(setOrientation:animationParameters:), 4)) {
+            %init(UDSBWindowOrientationS2);
+            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[UDSB-S2] installed");
         }
     }
 
