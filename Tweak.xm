@@ -157,6 +157,42 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 }
 
 
+// Bounded local diagnostics: private file, no network or screen content.
+#import <stdio.h>
+#import <stdarg.h>
+#import <sys/stat.h>
+static NSString *UDGFilePath;
+static void UDGPrepareFile(void) {
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *path = [directory stringByAppendingPathComponent:@"upsidedowned-G.txt"];
+    FILE *file = fopen(path.fileSystemRepresentation, "w");
+    if (!file) {
+        path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"upsidedowned-G.txt"];
+        file = fopen(path.fileSystemRepresentation, "w");
+    }
+    if (file) {
+        chmod(path.fileSystemRepresentation, 0600);
+        fprintf(file, "G file diagnostics; overwritten on SpringBoard restart.\n");
+        fclose(file);
+        UDGFilePath = [path copy];
+    }
+}
+static void UDGWrite(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void UDGWrite(NSString *format, ...) {
+    if (!UDGFilePath) return;
+    struct stat info;
+    if (stat(UDGFilePath.fileSystemRepresentation, &info) == 0 && info.st_size >= 2 * 1024 * 1024) return;
+    va_list args;
+    va_start(args, format);
+    NSString *text = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    FILE *file = fopen(UDGFilePath.fileSystemRepresentation, "a");
+    if (!file) return;
+    fprintf(file, "%.3f %s\n", NSDate.date.timeIntervalSince1970, text.UTF8String);
+    fclose(file);
+}
+
 // G diagnostic only: no status-bar transform, no orientation-mask change.
 // It records the classes/methods present on this build before any future policy hook.
 static void UD_G_LogClassMethods(Class cls) {
@@ -164,7 +200,7 @@ static void UD_G_LogClassMethods(Class cls) {
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
     if (!methods) return;
-    NSLog(@"[UD-G] class=%@ instanceMethods=%u", NSStringFromClass(cls), count);
+    UDGWrite(@"[UD-G] class=%@ instanceMethods=%u", NSStringFromClass(cls), count);
     for (unsigned int i = 0; i < count; ++i) {
         SEL sel = method_getName(methods[i]);
         NSString *name = NSStringFromSelector(sel);
@@ -172,7 +208,7 @@ static void UD_G_LogClassMethods(Class cls) {
             [name rangeOfString:@"orientation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
             [name rangeOfString:@"rotation" options:NSCaseInsensitiveSearch].location != NSNotFound ||
             [name rangeOfString:@"scene" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            NSLog(@"[UD-G] %@ - %@ types=%s", NSStringFromClass(cls), name, method_getTypeEncoding(methods[i]));
+            UDGWrite(@"[UD-G] %@ - %@ types=%s", NSStringFromClass(cls), name, method_getTypeEncoding(methods[i]));
         }
     }
     free(methods);
@@ -188,7 +224,7 @@ static void UD_G_LogState(NSString *reason) {
         UIInterfaceOrientation value = ((UIInterfaceOrientation (*)(id, SEL))objc_msgSend)(application, appSel);
         appOrientation = [NSString stringWithFormat:@"%ld", (long)value];
     }
-    NSLog(@"[UD-G] state reason=%@ deviceOrientation=%ld appStatusBarOrientation=%@", reason, (long)device.orientation, appOrientation);
+    UDGWrite(@"[UD-G] state reason=%@ deviceOrientation=%ld appStatusBarOrientation=%@", reason, (long)device.orientation, appOrientation);
     // UIApplication.windows is deprecated and treated as an error by the
     // GitHub Xcode build. Enumerate windows through connected window scenes.
     NSSet *connectedScenes = application.connectedScenes;
@@ -196,7 +232,7 @@ static void UD_G_LogState(NSString *reason) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         UIWindowScene *windowScene = (UIWindowScene *)scene;
         for (UIWindow *window in windowScene.windows) {
-            NSLog(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)windowScene.interfaceOrientation);
+            UDGWrite(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)windowScene.interfaceOrientation);
         }
     }
 }
@@ -204,6 +240,8 @@ static void UD_G_LogState(NSString *reason) {
 %ctor {
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 17) return;
     dispatch_async(dispatch_get_main_queue(), ^{
+        UDGPrepareFile();
+        UDGWrite(@"[UD-G] file=%@", UDGFilePath);
         NSArray *names = @[
             @"SBStatusBarManager", @"SBStatusBarStateAggregator", @"SBStatusBarSceneManager",
             @"SBStatusBarWindow", @"SBStatusBarView", @"SBSceneManager", @"SBSceneHandle",
@@ -212,6 +250,15 @@ static void UD_G_LogState(NSString *reason) {
         ];
         for (NSString *name in names) UD_G_LogClassMethods(NSClassFromString(name));
         UD_G_LogState(@"initial");
+        __block NSUInteger samples = 0;
+        NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *activeTimer) {
+            UD_G_LogState(@"periodic-2s");
+            if (++samples >= 90) {
+                UDGWrite(@"[UD-G] periodic sampling finished after 3 minutes");
+                [activeTimer invalidate];
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:UIDeviceOrientationDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
             (void)note;
