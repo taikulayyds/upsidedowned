@@ -81,8 +81,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %end
 %hook SBCoverSheetPrimarySlidingViewController
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    UIInterfaceOrientationMask originalMask = %orig;
-    return originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+    return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
 }
 %end
 
@@ -92,7 +91,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %end
 %end
 
-// E: change only the supported mask at the SpringBoard scene boundary.
+// F: change only the supported mask at the SpringBoard scene boundary.
 // _application and _supportedOrientations are declared in iOS 17 headers.
 %group UDSceneUpsideMask
 %hook SBTraitsSceneParticipantDelegate
@@ -115,11 +114,13 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
         // Include Apple apps (e.g. Settings); only SpringBoard keeps its
         // separate Home/Lock policy instead of the application-scene override.
         if ([bundle isEqualToString:@"com.apple.springboard"]) return originalMask;
-        unsigned long long result = originalMask | UIInterfaceOrientationMaskPortraitUpsideDown;
+        // Only expand scenes that already support portrait. A landscape-only
+        // playback scene retains its original mask, even inside a portrait app.
+        unsigned long long result = originalMask | UIInterfaceOrientationMaskAll;
         static unsigned int diagnosticCount = 0;
         if (diagnosticCount < 80) {
             ++diagnosticCount;
-            NSLog(@"[UD-E] app=%@ supported=0x%llx -> 0x%llx", bundle, originalMask, result);
+            NSLog(@"[UD-F] app=%@ supported=0x%llx -> 0x%llx", bundle, originalMask, result);
         }
         return result;
     } @catch (NSException *exception) {
@@ -140,7 +141,7 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
             method_getReturnType(maskMethod, maskType, sizeof(maskType));
             if (maskType[0] == 'Q' && maskType[1] == '\0') {
                 %init(UDSceneUpsideMask);
-                NSLog(@"[UD-E] SpringBoard-only scene mask candidate enabled");
+                NSLog(@"[UD-F] SpringBoard-only scene mask candidate enabled");
             }
         }
     }
