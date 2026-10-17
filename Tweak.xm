@@ -129,6 +129,89 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
 %end
 %end
 
+#import <os/log.h>
+#include <string.h>
+
+// S1: only relax the SYSTEM status-bar root-controller orientation mask.
+// No transforms, window-frame edits, orientation setters or Medusa hooks.
+static BOOL UDSBSignature(id object, SEL selector, const char *types) {
+    if (!object) return NO;
+    Method m = class_getInstanceMethod(object_getClass(object), selector);
+    if (!m || method_getNumberOfArguments(m) != 2) return NO;
+    char result[32] = {0};
+    method_getReturnType(m, result, sizeof(result));
+    return result[0] && result[1] == '\0' && strchr(types, result[0]);
+}
+static id UDSBObject(id object, NSString *name) {
+    SEL sel = NSSelectorFromString(name);
+    if (!UDSBSignature(object, sel, "@")) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(object, sel);
+}
+static BOOL UDSBBool(id object, NSString *name, BOOL *value) {
+    SEL sel = NSSelectorFromString(name);
+    if (!UDSBSignature(object, sel, "Bc")) return NO;
+    *value = ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
+    return YES;
+}
+static BOOL UDSBEligible(id root) {
+    if (![NSThread isMainThread]) return NO;
+    id window = UDSBObject(root, @"statusBarWindow");
+    Class wc = NSClassFromString(@"SBStatusBarWindow");
+    if (!wc || ![window isKindOfClass:wc]) return NO;
+    UIWindowScene *scene = [(UIWindow *)window windowScene];
+    BOOL main = NO;
+    if (!UDSBBool(scene, @"isMainDisplayWindowScene", &main) || !main)
+        return NO;
+    if (scene.interfaceOrientation != UIInterfaceOrientationPortraitUpsideDown)
+        return NO;
+
+    // Require positive Home/Lock evidence; unknown states fail closed.
+    id cover = UDSBObject(scene, @"coverSheetPresentationManager");
+    BOOL presented = NO;
+    if (!UDSBBool(cover, @"isPresented", &presented)) return NO;
+    if (presented) return YES;
+    id icons = UDSBObject(NSClassFromString(@"SBIconController"),
+                          @"sharedInstanceIfExists");
+    BOOL occluded = YES;
+    if (!UDSBBool(icons, @"areHomeScreenIconsOccluded", &occluded) || occluded)
+        return NO;
+    id home = UDSBObject(icons, @"homeScreenViewController");
+    if (![home isKindOfClass:[UIViewController class]]) return NO;
+    UIView *view = [(UIViewController *)home viewIfLoaded];
+    UIWindow *homeWindow = view.window;
+    return homeWindow && homeWindow.windowScene == scene &&
+           !homeWindow.hidden && !view.hidden && view.alpha > 0.01;
+}
+
+%group UDSBSystemStatusBarCandidate
+%hook _SBStatusBarWindowRootViewController
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    UIInterfaceOrientationMask originalMask = %orig;
+    BOOL eligible = UDSBEligible(self);
+    UIInterfaceOrientationMask result = originalMask;
+    if (eligible) result |= UIInterfaceOrientationMaskPortraitUpsideDown;
+    static NSUInteger samples = 0;
+    static BOOL seen = NO;
+    static UIInterfaceOrientationMask lastOriginal = 0, lastResult = 0;
+    static BOOL lastEligible = NO;
+    if ([NSThread isMainThread] && samples < 40 &&
+        (!seen || lastOriginal != originalMask || lastResult != result ||
+         lastEligible != eligible)) {
+        os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
+            "[UDSB-S1] mask original=%llu result=%llu eligible=%d",
+            (unsigned long long)originalMask, (unsigned long long)result,
+            (int)eligible);
+        seen = YES;
+        lastOriginal = originalMask;
+        lastResult = result;
+        lastEligible = eligible;
+        samples++;
+    }
+    return result;
+}
+%end
+%end
+
 %ctor {
     %init;
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
@@ -152,4 +235,21 @@ static NSString *const UDPadDepthKey = @"com.34306.upsidedowned.padDepth";
             if ((t[0] == 'B' || t[0] == 'c') && t[1] == '\0') %init(UDIOS17UpsideDownPolicy);
         }
     }
+    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] &&
+        NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 17) {
+        Class root = NSClassFromString(@"_SBStatusBarWindowRootViewController");
+        Method m = class_getInstanceMethod(root, @selector(supportedInterfaceOrientations));
+        char type[32] = {0};
+        if (m) method_getReturnType(m, type, sizeof(type));
+        if (m && method_getNumberOfArguments(m) == 2 &&
+            strcmp(type, @encode(UIInterfaceOrientationMask)) == 0) {
+            %init(UDSBSystemStatusBarCandidate);
+            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
+                             "[UDSB-S1] installed mask candidate");
+        } else {
+            os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT,
+                             "[UDSB-S1] skipped: incompatible root method");
+        }
+    }
+
 }
