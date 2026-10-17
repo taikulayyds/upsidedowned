@@ -189,9 +189,15 @@ static void UD_G_LogState(NSString *reason) {
         appOrientation = [NSString stringWithFormat:@"%ld", (long)value];
     }
     NSLog(@"[UD-G] state reason=%@ deviceOrientation=%ld appStatusBarOrientation=%@", reason, (long)device.orientation, appOrientation);
-    NSArray *windows = application.windows;
-    for (UIWindow *window in windows) {
-        NSLog(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)window.windowScene.interfaceOrientation);
+    // UIApplication.windows is deprecated and treated as an error by the
+    // GitHub Xcode build. Enumerate windows through connected window scenes.
+    NSSet *connectedScenes = application.connectedScenes;
+    for (UIScene *scene in connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        for (UIWindow *window in windowScene.windows) {
+            NSLog(@"[UD-G] window class=%@ level=%.1f hidden=%d bounds=%@ interface=%ld", NSStringFromClass(window.class), window.windowLevel, window.hidden, NSStringFromCGRect(window.bounds), (long)windowScene.interfaceOrientation);
+        }
     }
 }
 
